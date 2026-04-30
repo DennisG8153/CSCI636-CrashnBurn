@@ -2,7 +2,7 @@
 """
 generate_dashboard.py
 ─────────────────────
-Usage:                    python generate_dashboard.py
+Run from mr3/ directory:  python generate_dashboard.py
 Outputs:                  dashboard.html  (self-contained, no server needed)
 
 Reads:
@@ -34,8 +34,6 @@ def build_static(df: pd.DataFrame) -> dict:
         active_licenses   = ("active_licenses",   "first"),
         outdated_licenses = ("outdated_licenses", "first"),
         type_counts_json  = ("type_counts_json",  "first"),
-        lat               = ("crash_lat",         "mean"),
-        lon               = ("crash_lon",         "mean"),
     ).reset_index()
 
     out = {}
@@ -50,14 +48,12 @@ def build_static(df: pd.DataFrame) -> dict:
             "a":   int(r["active_licenses"]),
             "o":   int(r["outdated_licenses"]),
             "t":   types,
-            "lat": round(float(r["lat"]), 6),
-            "lon": round(float(r["lon"]), 6),
         }
     return out
 
 
 def build_daily_by_date(df: pd.DataFrame) -> dict:
-    """{ date → { zone_id → {c, i, k, lat, lon} } } for daily map view."""
+    """{ date → { zone_id → {c, i, k} } } for daily map view."""
     out = defaultdict(dict)
     for _, r in df.iterrows():
         d = str(r["crash_date"])[:10]
@@ -65,8 +61,6 @@ def build_daily_by_date(df: pd.DataFrame) -> dict:
             "c":   int(r["crashes"]),
             "i":   int(r["injured"]),
             "k":   int(r["killed"]),
-            "lat": round(float(r["crash_lat"]), 6),
-            "lon": round(float(r["crash_lon"]), 6),
         }
     return dict(out)
 
@@ -85,8 +79,7 @@ def build_daily_timeline(df: pd.DataFrame) -> dict:
 
 
 def build_hourly_by_hour(df: pd.DataFrame) -> dict:
-    """{ hour → { zone_id → {ac, ai, ak, lat, lon, s, a, o} } } for hourly map view."""
-    # Build per-zone static lookup for store enrichment
+    """{ hour → { zone_id → {ac, ai, ak, s, a, o} } } for hourly map view."""
     zone_store = {}
     for _, r in df.drop_duplicates("zone_id").iterrows():
         zone_store[r["zone_id"]] = {
@@ -104,8 +97,6 @@ def build_hourly_by_hour(df: pd.DataFrame) -> dict:
             "ac":  round(float(r["avg_crashes"]), 4),
             "ai":  round(float(r["avg_injured"]), 4),
             "ak":  round(float(r["avg_killed"]),  4),
-            "lat": round(float(r["crash_lat"]),   6),
-            "lon": round(float(r["crash_lon"]),   6),
             **sv,
         }
     return {int(k): v for k, v in out.items()}
@@ -133,17 +124,13 @@ def build_crash_only(df_daily_mr: pd.DataFrame, daily_zones: set) -> dict:
     df_daily_mr["crashes"] = pd.to_numeric(df_daily_mr.get("crashes"), errors="coerce").fillna(0)
     agg = df_daily_mr.groupby("zone_id").agg(
         crashes = ("crashes", "sum"),
-        lat     = ("avg_lat", "mean"),
-        lon     = ("avg_lon", "mean"),
     ).reset_index()
 
     out = {}
     for _, r in agg.iterrows():
         if r["zone_id"] not in daily_zones:
             out[r["zone_id"]] = {
-                "c":   int(r["crashes"]),
-                "lat": round(float(r["lat"]), 6),
-                "lon": round(float(r["lon"]), 6),
+                "c": int(r["crashes"]),
             }
     return out
 
@@ -451,18 +438,6 @@ header{
   font-family:var(--font-mono);
 }
 
-#date-sel{
-  background:var(--surf2);
-  border:1px solid var(--border);
-  color:var(--text);
-  padding:5px 10px;
-  border-radius:6px;
-  font-size:12px;
-  font-family:var(--font-ui);
-  cursor:pointer;
-  outline:none;
-}
-#date-sel:focus{border-color:var(--accent)}
 .ctrl-hint{font-size:12px;color:var(--muted)}
 #daily-zone-ct{font-size:12px;color:var(--text);font-weight:600;font-family:var(--font-mono)}
 
@@ -704,15 +679,24 @@ function setMode(m) {
 
   if (m === 'daily') {
     ctrl.className = 'vis';
+    const initIdx = curDate ? DATES.indexOf(curDate) : DATES.length - 1;
+    const safeIdx = initIdx < 0 ? DATES.length - 1 : initIdx;
     ctrl.innerHTML = `
-      <span class="ctrl-hint">Date:</span>
-      <select id="date-sel" onchange="onDateChange(this.value)">
-        ${[...DATES].reverse().map(d=>`<option value="${d}">${d}</option>`).join('')}
-      </select>
-      <span class="ctrl-hint">showing crashes on selected date</span>
-      <span id="daily-zone-ct" style="margin-left:auto"></span>`;
-    if (curDate) { document.getElementById('date-sel').value = curDate; }
-    renderDaily(curDate || DATES[DATES.length-1]);
+      <span id="date-lbl" style="font-family:var(--font-mono);font-size:13px;font-weight:700;color:var(--accent);min-width:100px">
+        ${DATES[safeIdx] || ''}
+      </span>
+      <div class="slider-wrap">
+        <input type="range" id="date-slider"
+               min="0" max="${DATES.length - 1}" value="${safeIdx}"
+               oninput="onDateSlider(this.value)">
+        <div class="tick-row">
+          <span>${DATES[0] || ''}</span>
+          <span>${DATES[Math.floor(DATES.length/2)] || ''}</span>
+          <span>${DATES[DATES.length-1] || ''}</span>
+        </div>
+      </div>
+      <span id="daily-zone-ct" style="font-family:var(--font-mono);font-size:12px;color:var(--text);margin-left:8px"></span>`;
+    renderDaily(DATES[safeIdx]);
 
   } else if (m === 'hourly') {
     ctrl.className = 'vis';
@@ -737,9 +721,11 @@ function setMode(m) {
   closeSidebar();
 }
 
-function onDateChange(val) {
-  curDate = val;
-  renderDaily(val);
+function onDateSlider(idx) {
+  curDate = DATES[parseInt(idx)];
+  const lbl = document.getElementById('date-lbl');
+  if (lbl) lbl.textContent = curDate;
+  renderDaily(curDate);
   if (selZone) showDrill(selZone);
 }
 
