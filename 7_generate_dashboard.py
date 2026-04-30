@@ -20,7 +20,7 @@ from collections import defaultdict
 DAILY_FINAL  = "mr_daily_final.csv"
 HOURLY_FINAL = "mr_hourly_final.csv"
 DAILY_MR     = "daily_crash_mr.csv"
-OUTPUT       = "dashboard.html"
+OUTPUT       = "index.html"
 
 # ── Data builders ─────────────────────────────────────────────────────────────
 
