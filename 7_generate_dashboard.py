@@ -2,7 +2,7 @@
 """
 generate_dashboard.py
 ─────────────────────
-Run from mr3/ directory:  python generate_dashboard.py
+Usage:                    python generate_dashboard.py
 Outputs:                  dashboard.html  (self-contained, no server needed)
 
 Reads:
