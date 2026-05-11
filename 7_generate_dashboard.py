@@ -1,15 +1,4 @@
 #!/usr/bin/env python3
-"""
-generate_dashboard.py
-─────────────────────
-Run from mr3/ directory:  python generate_dashboard.py
-Outputs:                  dashboard.html  (self-contained, no server needed)
-
-Reads:
-  mr_daily_final.csv    — zone+date level crash+store join
-  mr_hourly_final.csv   — zone+hour level crash+store join
-  daily_crash_mr.csv    — all crash zones (incl. crash-only, no store)
-"""
 
 import json, os, sys
 import pandas as pd
@@ -17,16 +6,15 @@ import numpy as np
 from collections import defaultdict
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-DAILY_FINAL  = "mr_daily_final.csv"
-HOURLY_FINAL = "mr_hourly_final.csv"
-DAILY_MR     = "daily_crash_mr.csv"
-STORES_CSV   = "manhattan_liquor_stores_geocoded.csv"
-OUTPUT       = "index.html"
+DAILY_FINAL   = "mr_daily_final.csv"
+HOURLY_FINAL  = "mr_hourly_final.csv"
+# MARKERS_JSON  = "store_markers.json"
+OUTPUT        = "index.html"
 
 # ── Data builders ─────────────────────────────────────────────────────────────
 
 def build_static(df: pd.DataFrame) -> dict:
-    """Per-zone all-time totals."""
+    """Per-zone all-time totals. Zones with store_count=0 are crash-only."""
     agg = df.groupby("zone_id").agg(
         crashes           = ("crashes",           "sum"),
         injured           = ("injured",           "sum"),
@@ -54,20 +42,23 @@ def build_static(df: pd.DataFrame) -> dict:
 
 
 def build_daily_by_date(df: pd.DataFrame) -> dict:
-    """{ date → { zone_id → {c, i, k} } } for daily map view."""
+    """{ date -> { zone_id -> {c, i, k, s, a, o} } } for daily map view."""
     out = defaultdict(dict)
     for _, r in df.iterrows():
         d = str(r["crash_date"])[:10]
         out[d][r["zone_id"]] = {
-            "c":   int(r["crashes"]),
-            "i":   int(r["injured"]),
-            "k":   int(r["killed"]),
+            "c": int(r["crashes"]),
+            "i": int(r["injured"]),
+            "k": int(r["killed"]),
+            "s": int(r["store_count"]),
+            "a": int(r["active_licenses"]),
+            "o": int(r["outdated_licenses"]),
         }
     return dict(out)
 
 
 def build_daily_timeline(df: pd.DataFrame) -> dict:
-    """{ zone_id → [{d, c, i, k}, ...] } for sidebar timeline chart."""
+    """{ zone_id -> [{d, c, i, k}, ...] } for sidebar timeline chart."""
     out = defaultdict(list)
     for _, r in df.sort_values("crash_date").iterrows():
         out[r["zone_id"]].append({
@@ -80,9 +71,12 @@ def build_daily_timeline(df: pd.DataFrame) -> dict:
 
 
 def build_hourly_by_hour(df: pd.DataFrame) -> dict:
-    """{ hour → { zone_id → {ac, ai, ak, s, a, o} } } for hourly map view."""
+    """{ hour -> { zone_id -> {ac, ai, ak, s, a, o} } }
+    Only includes zones with store_count > 0 (hourly view is store-focused)."""
+    df_stores = df[df["store_count"] > 0]
+
     zone_store = {}
-    for _, r in df.drop_duplicates("zone_id").iterrows():
+    for _, r in df_stores.drop_duplicates("zone_id").iterrows():
         zone_store[r["zone_id"]] = {
             "s": int(r["store_count"]),
             "a": int(r["active_licenses"]),
@@ -90,7 +84,7 @@ def build_hourly_by_hour(df: pd.DataFrame) -> dict:
         }
 
     out = defaultdict(dict)
-    for _, r in df.iterrows():
+    for _, r in df_stores.iterrows():
         h   = int(r["hour"])
         zid = r["zone_id"]
         sv  = zone_store.get(zid, {"s": 0, "a": 0, "o": 0})
@@ -104,7 +98,7 @@ def build_hourly_by_hour(df: pd.DataFrame) -> dict:
 
 
 def build_zone_hourly(df: pd.DataFrame) -> dict:
-    """{ zone_id → [24 x {ac, ai, ak}] } for sidebar hourly bar chart."""
+    """{ zone_id -> [24 x {ac, ai, ak}] } for sidebar hourly bar chart."""
     empty = [{"ac": 0, "ai": 0, "ak": 0} for _ in range(24)]
     out   = {}
     for _, r in df.iterrows():
@@ -118,50 +112,6 @@ def build_zone_hourly(df: pd.DataFrame) -> dict:
             "ak": round(float(r["avg_killed"]),  4),
         }
     return out
-
-
-def build_crash_only(df_daily_mr: pd.DataFrame, daily_zones: set) -> dict:
-    """Zones with crashes but no nearby stores (from daily_crash_mr only)."""
-    df_daily_mr["crashes"] = pd.to_numeric(df_daily_mr.get("crashes"), errors="coerce").fillna(0)
-    agg = df_daily_mr.groupby("zone_id").agg(
-        crashes = ("crashes", "sum"),
-    ).reset_index()
-
-    out = {}
-    for _, r in agg.iterrows():
-        if r["zone_id"] not in daily_zones:
-            out[r["zone_id"]] = {
-                "c": int(r["crashes"]),
-            }
-    return out
-
-
-def build_store_points(df_stores: pd.DataFrame) -> list:
-    """List of [lat, lon, active] for each store — used for hourly map markers."""
-    from datetime import datetime
-    pts = []
-    for _, r in df_stores.iterrows():
-        try:
-            lat = float(r["latitude"])
-            lon = float(r["longitude"])
-            exp = pd.to_datetime(r.get("license_expiration_date", ""), errors="coerce")
-            active = 1 if pd.notna(exp) and exp >= pd.Timestamp.today() else 0
-            pts.append([round(lat, 6), round(lon, 6), active])
-        except:
-            continue
-    return pts
-
-
-def build_daily_crash_only_by_date(df_daily_mr: pd.DataFrame, store_zones: set) -> dict:
-    """{ date → { zone_id → {c} } } for crash-only zones per day (no nearby store)."""
-    df_daily_mr["crashes"] = pd.to_numeric(df_daily_mr.get("crashes"), errors="coerce").fillna(0)
-    out = defaultdict(dict)
-    for _, r in df_daily_mr.iterrows():
-        if r["zone_id"] not in store_zones:
-            d = str(r["crash_date"])[:10]
-            zid = r["zone_id"]
-            out[d][zid] = {"c": out[d].get(zid, {}).get("c", 0) + int(r["crashes"])}
-    return dict(out)
 
 
 # ── HTML template ─────────────────────────────────────────────────────────────
@@ -542,6 +492,12 @@ header{
 __DATA_INJECTION__
 
 // ════════════════════════════════════════════════════════
+//  STORE MARKERS — active computed at page load from raw exp date
+// ════════════════════════════════════════════════════════
+const TODAY = new Date();
+TODAY.setHours(0,0,0,0);
+
+// ════════════════════════════════════════════════════════
 //  STATE
 // ════════════════════════════════════════════════════════
 let mode        = 'static';
@@ -597,11 +553,13 @@ function clearStores() {
 }
 
 function drawStores() {
-  for (const [lat, lon, active] of STORE_POINTS) {
-    const m = L.circleMarker([lat, lon], {
+  for (const p of STORE_POINTS) {
+    const active = new Date(p.exp) >= TODAY;
+    const color  = active ? '#4ade80' : '#f87171';
+    const m = L.circleMarker([p.lat, p.lon], {
       radius:      3,
-      color:       active ? '#4ade80' : '#f87171',
-      fillColor:   active ? '#4ade80' : '#f87171',
+      color,
+      fillColor:   color,
       fillOpacity: 0.75,
       weight:      0,
     });
@@ -612,7 +570,8 @@ function drawStores() {
   }
 }
 
-function drawLayer(zoneData, valueKey, maxV, blue) {
+// Draw all zones in zoneData. Blue hexes for crash-only (d.s === 0).
+function drawLayer(zoneData, valueKey, maxV) {
   let zones = 0, crashes = 0, injured = 0;
 
   for (const [zid, d] of Object.entries(zoneData)) {
@@ -620,6 +579,7 @@ function drawLayer(zoneData, valueKey, maxV, blue) {
     try { boundary = h3.cellToBoundary(zid); }
     catch { continue; }
 
+    const blue = (d.s === 0);
     const val   = d[valueKey] || 0;
     const ratio = val / maxV;
     const [color, fillOp] = blue ? ['#3b82f6', 0.32] : scale(ratio);
@@ -629,10 +589,8 @@ function drawLayer(zoneData, valueKey, maxV, blue) {
       weight:0.6, opacity:0.85,
     });
 
-    poly.bindTooltip(buildTip(zid, d, blue), {
-      sticky:true, className:'ztip', opacity:1,
-    });
-    poly.on('click', () => showDrill(zid, blue));
+    poly.bindTooltip(buildTip(zid, d), {sticky:true, className:'ztip', opacity:1});
+    poly.on('click', () => showDrill(zid));
     poly.addTo(map);
     hexLayers[zid] = poly;
 
@@ -643,26 +601,21 @@ function drawLayer(zoneData, valueKey, maxV, blue) {
   return {zones, crashes, injured};
 }
 
-function updateStats(a, b) {
-  const z = a.zones + b.zones;
-  const c = Math.round(a.crashes + b.crashes);
-  const i = Math.round(a.injured + b.injured);
-  document.getElementById('s-zones').textContent   = z.toLocaleString();
-  document.getElementById('s-crashes').textContent = c.toLocaleString();
-  document.getElementById('s-injured').textContent = i.toLocaleString();
+function updateStats(r) {
+  document.getElementById('s-zones').textContent   = r.zones.toLocaleString();
+  document.getElementById('s-crashes').textContent = Math.round(r.crashes).toLocaleString();
+  document.getElementById('s-injured').textContent = Math.round(r.injured).toLocaleString();
 }
 
-function buildTip(zid, d, blue) {
-  if (blue) {
-    return `<b>Crashes (alcohol):</b> ${d.c}<br>
+function buildTip(zid, d) {
+  if (d.s === 0) {
+    return `<b>Crashes (alcohol):</b> ${d.c ?? d.ac ?? 0}<br>
             <span style="color:#3b82f6;font-size:11px">No liquor stores in this zone</span>`;
   }
   if (d.ac !== undefined) {
-    // hourly data
     return `<b>Avg crashes/hr:</b> ${(d.ac||0).toFixed(2)} &nbsp;·&nbsp; <b>Inj:</b> ${(d.ai||0).toFixed(2)} &nbsp;·&nbsp; <b>Killed:</b> ${(d.ak||0).toFixed(2)}<br>
             <b>Stores:</b> ${d.s||0} (${d.a||0} active / ${d.o||0} outdated)`;
   }
-  // static / daily data
   return `<b>Crashes:</b> ${d.c} &nbsp;·&nbsp; <b>Inj:</b> ${d.i} &nbsp;·&nbsp; <b>Killed:</b> ${d.k}<br>
           <b>Stores:</b> ${d.s} (${d.a} active / ${d.o} outdated)`;
 }
@@ -671,52 +624,32 @@ function buildTip(zid, d, blue) {
 //  RENDER MODES
 // ════════════════════════════════════════════════════════
 function renderStatic() {
-  clearHexes();
-  clearStores();
+  clearHexes(); clearStores();
   const maxC = maxOf(STATIC_DATA, 'c');
-  const a = drawLayer(STATIC_DATA, 'c', maxC, false);
-  const b = drawLayer(CRASH_ONLY,  'c', maxC, true);
-  updateStats(a, b);
+  updateStats(drawLayer(STATIC_DATA, 'c', maxC));
 }
 
 function renderDaily(date) {
-  clearHexes();
-  clearStores();
+  clearHexes(); clearStores();
   const dayData = DAILY_BY_DATE[date];
   if (!dayData) {
-    document.getElementById('s-zones').textContent   = '0';
-    document.getElementById('s-crashes').textContent = '0';
-    document.getElementById('s-injured').textContent = '0';
+    updateStats({zones:0, crashes:0, injured:0});
     return;
   }
+  const maxC = maxOf(dayData, 'c') || 1;
+  const r = drawLayer(dayData, 'c', maxC);
+  updateStats(r);
 
-  // Enrich with store info from STATIC_DATA
-  const enriched = {};
-  for (const [zid, d] of Object.entries(dayData)) {
-    const st = STATIC_DATA[zid];
-    if (st) enriched[zid] = {...d, s:st.s, a:st.a, o:st.o, t:st.t};
-  }
-
-  const dailyCrashOnly = DAILY_CRASH_ONLY_BY_DATE[date] || {};
-  const maxC = maxOf(enriched, 'c') || maxOf(dailyCrashOnly, 'c') || 1;
-  const a = drawLayer(enriched,      'c', maxC, false);
-  const b = drawLayer(dailyCrashOnly,'c', maxC, true);
-  updateStats(a, b);
-
-  const total = Object.keys(enriched).length + Object.keys(dailyCrashOnly).length;
   const ct = document.getElementById('daily-zone-ct');
-  if (ct) ct.textContent = `${total} zones`;
+  if (ct) ct.textContent = `${r.zones} zones`;
 }
 
 function renderHourly(hour) {
-  clearHexes();
-  clearStores();
+  clearHexes(); clearStores();
   const hourData = HOURLY_BY_HOUR[hour] || {};
   const maxC = maxOf(hourData, 'ac');
-  const a = drawLayer(hourData,  'ac', maxC, false);
-  const b = drawLayer(CRASH_ONLY, 'c', maxOf(CRASH_ONLY,'c'), true);
+  updateStats(drawLayer(hourData, 'ac', maxC));
   drawStores();
-  updateStats(a, b);
 
   const h12  = hour % 12 || 12;
   const ampm = hour < 12 ? 'AM' : 'PM';
@@ -797,31 +730,29 @@ function onHourChange(val) {
 // ════════════════════════════════════════════════════════
 //  DRILL-DOWN SIDEBAR
 // ════════════════════════════════════════════════════════
-function showDrill(zid, isCrashOnly) {
+function showDrill(zid) {
   selZone = zid;
   document.getElementById('sidebar').classList.add('open');
   document.getElementById('sb-empty').style.display  = 'none';
   const el = document.getElementById('sb-zone');
   el.style.display = 'block';
 
-  // Highlight selected hex
   for (const [z, p] of Object.entries(hexLayers)) {
     p.setStyle({weight: z === zid ? 2.5 : 0.6, opacity: z === zid ? 1 : 0.85});
   }
 
-  const sd      = STATIC_DATA[zid];
-  const co      = CRASH_ONLY[zid];
-  const daily   = DAILY_DATA[zid]  || [];
-  const hourly  = ZONE_HOURLY[zid] || Array(24).fill({ac:0});
+  const sd     = STATIC_DATA[zid];
+  const daily  = DAILY_DATA[zid]  || [];
+  const hourly = ZONE_HOURLY[zid] || Array(24).fill({ac:0});
 
-  const totalC = sd ? sd.c : co ? co.c : daily.reduce((s,d)=>s+d.c, 0);
+  const totalC = sd ? sd.c : daily.reduce((s,d)=>s+d.c, 0);
   const totalI = sd ? sd.i : daily.reduce((s,d)=>s+d.i, 0);
   const totalK = sd ? sd.k : daily.reduce((s,d)=>s+d.k, 0);
 
   let html = `<div class="zone-id">${zid}</div>`;
 
-  if (!sd || isCrashOnly) {
-    html += `<div class="crash-only-tag">⚠ No liquor stores mapped to this zone</div>`;
+  if (!sd || sd.s === 0) {
+    html += `<div class="crash-only-tag">&#9888; No liquor stores mapped to this zone</div>`;
   }
 
   html += `
@@ -831,7 +762,7 @@ function showDrill(zid, isCrashOnly) {
       <div class="scard"><div class="scard-val vk">${totalK}</div><div class="scard-lbl">Killed</div></div>
     </div>`;
 
-  if (sd) {
+  if (sd && sd.s > 0) {
     html += `
       <div class="sec">Liquor Stores</div>
       <div class="store-box">
@@ -862,11 +793,9 @@ function showDrill(zid, isCrashOnly) {
 
   el.innerHTML = html;
 
-  // Chart defaults
   const GRID = '#141b22';
   const TICK = {color:'#5c7080', font:{size:10, family:'Space Mono'}};
 
-  // Timeline chart
   if (tChart) tChart.destroy();
   tChart = new Chart(document.getElementById('tc').getContext('2d'), {
     type:'line',
@@ -893,7 +822,6 @@ function showDrill(zid, isCrashOnly) {
     }
   });
 
-  // Hourly bar chart
   if (hChart) hChart.destroy();
   const hLabels = Array.from({length:24},(_,i)=> i%3===0
     ? (i===0?'12a': i<12?`${i}a`: i===12?'12p':`${i-12}p`) : '');
@@ -941,18 +869,21 @@ renderStatic();
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    for f in [DAILY_FINAL, HOURLY_FINAL, DAILY_MR]:
-        if not os.path.exists(f):
-            print(f"ERROR: {f} not found. Run MR notebooks first.")
-            sys.exit(1)
+    # for f in [DAILY_FINAL, HOURLY_FINAL, MARKERS_JSON]:
+    #     if not os.path.exists(f):
+    #         print(f"ERROR: {f} not found.")
+    #         if f == MARKERS_JSON:
+    #             print("  Run: python extract_map_markers.py")
+    #         else:
+    #             print("  Run the corresponding MR notebooks first.")
+    #         sys.exit(1)
 
     print("Loading CSVs...")
-    df_daily    = pd.read_csv(DAILY_FINAL)
-    df_hourly   = pd.read_csv(HOURLY_FINAL)
-    df_daily_mr = pd.read_csv(DAILY_MR)
-    df_stores   = pd.read_csv(STORES_CSV) if os.path.exists(STORES_CSV) else pd.DataFrame()
+    df_daily   = pd.read_csv(DAILY_FINAL)
+    df_hourly  = pd.read_csv(HOURLY_FINAL)
+    # with open(MARKERS_JSON, encoding="utf-8") as f:
+    #     store_points = json.load(f)
 
-    # Normalise numeric cols
     for col in ["crashes","injured","killed","store_count","active_licenses","outdated_licenses"]:
         if col in df_daily.columns:
             df_daily[col] = pd.to_numeric(df_daily[col], errors="coerce").fillna(0)
@@ -963,28 +894,24 @@ def main():
     daily_data    = build_daily_timeline(df_daily)
     hourly_by_hr  = build_hourly_by_hour(df_hourly)
     zone_hourly   = build_zone_hourly(df_hourly)
-    crash_only               = build_crash_only(df_daily_mr, set(static_data.keys()))
-    daily_crash_only_by_date = build_daily_crash_only_by_date(df_daily_mr, set(static_data.keys()))
-    store_points             = build_store_points(df_stores) if not df_stores.empty else []
     dates         = sorted(df_daily["crash_date"].str[:10].unique().tolist())
 
-    print(f"  Static zones    : {len(static_data):,}")
-    print(f"  Crash-only zones: {len(crash_only):,}")
-    print(f"  Date range      : {dates[0]} → {dates[-1]}  ({len(dates)} dates)")
+    crash_only_ct = sum(1 for v in static_data.values() if v["s"] == 0)
+    print(f"  Total zones     : {len(static_data):,}")
+    print(f"  Crash-only zones: {crash_only_ct:,}  (blue layer)")
+    print(f"  Store zones     : {len(static_data) - crash_only_ct:,}")
+    print(f"  Date range      : {dates[0]} -> {dates[-1]}  ({len(dates)} dates)")
     print(f"  Hours covered   : {sorted(hourly_by_hr.keys())}")
+    # print(f"  Store markers   : {len(store_points):,}")
 
-    # Build JS injection block
     js = "\n".join([
         f"const STATIC_DATA    = {json.dumps(static_data,   separators=(',',':'))};",
         f"const DAILY_BY_DATE  = {json.dumps(daily_by_date,  separators=(',',':'))};",
         f"const DAILY_DATA     = {json.dumps(daily_data,     separators=(',',':'))};",
         f"const HOURLY_BY_HOUR = {json.dumps({str(k):v for k,v in hourly_by_hr.items()}, separators=(',',':'))};",
         f"const ZONE_HOURLY    = {json.dumps(zone_hourly,    separators=(',',':'))};",
-        f"const CRASH_ONLY     = {json.dumps(crash_only,     separators=(',',':'))};",
-        f"const DAILY_CRASH_ONLY_BY_DATE = {json.dumps(daily_crash_only_by_date, separators=(',',':'))};",
-        f"const STORE_POINTS   = {json.dumps(store_points,   separators=(',',':'))};",
+        # f"const STORE_POINTS   = {json.dumps(store_points,   separators=(',',':'))};",
         f"const DATES          = {json.dumps(dates)};",
-        # h3 key fix: JS uses string keys, convert HOURLY_BY_HOUR
         "const _HBH = {}; for (const [k,v] of Object.entries(HOURLY_BY_HOUR)) _HBH[+k]=v;",
         "Object.assign(HOURLY_BY_HOUR, _HBH);",
     ])
@@ -995,7 +922,7 @@ def main():
         f.write(html)
 
     size_kb = os.path.getsize(OUTPUT) / 1024
-    print(f"\n✓ Saved → {OUTPUT}  ({size_kb:.0f} KB)")
+    print(f"\nSaved -> {OUTPUT}  ({size_kb:.0f} KB)")
     print("  Open in any browser — no server required.")
 
 
